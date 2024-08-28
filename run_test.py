@@ -5,12 +5,11 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import random as rnd
 import sys
-from multiprocessing import Pool, Manager
-from data_generator import FakeTextDataGenerator
+from multiprocessing import Pool
+from trdg.data_generator import FakeTextDataGenerator
 from tqdm import tqdm
 import argparse
 import os
-from PIL import Image
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Generate synthetic text data for text recognition.")
@@ -86,7 +85,7 @@ def parse_arguments():
     parser.add_argument("-cs", "--character_spacing", type=int, nargs="?", help="Define the width of the spaces between characters.", default=1)
     
     # Margins
-    parser.add_argument("-m", "--margins", type=str, nargs="?", help="Define the margins around the text when rendered.", default="0,0,0,0")
+    parser.add_argument("-m", "--margins", type=str, nargs="?", help="Define the margins around the text when rendered.", default="5,5,5,5")
     
     # Fit text
     parser.add_argument("-fi", "--fit", action="store_true", help="Apply a tight crop around the rendered text", default=False)
@@ -115,25 +114,9 @@ def parse_arguments():
     parser.add_argument("-im", "--image_mode", type=str, nargs="?", help="Define the image mode to be used.", default="RGB")
     
     return parser.parse_args()
-from functools import partial
-import errno
 
-import psutil
-import time
-import multiprocessing
-import signal
-import logging
-
-terminate_flag = multiprocessing.Event()
-
-def signal_handler(sig, frame):
-    print("Termination signal received, stopping processes...")
-    terminate_flag.set()
-
-def check_total_ram_usage(threshold):
-    return psutil.virtual_memory().used / (1024 ** 2) > threshold
-
-def stream_input_file(input_file, start_idx=0, batch_size=100):
+def stream_input_file(input_file, start_idx=0, batch_size=10000):
+    batch = []
     with open(input_file, 'r', encoding='utf-8') as file:
         batch = []
         for idx, line in enumerate(file):
@@ -148,63 +131,29 @@ def stream_input_file(input_file, start_idx=0, batch_size=100):
         if batch:
             yield idx, batch
 
-def remove_incorrect_srgb_profile(image_path):
-    try:
-        with Image.open(image_path) as img:
-            img.info.pop("icc_profile", None)  # Simplified profile removal
-            img.save(image_path)
-    except Exception as e:
-        print(f"Failed to process {image_path}: {e}")
+def create_labels_file(args):
+    with open(os.path.join(args.output_dir, "labels.txt"), "w", encoding="utf8") as f:
+        for idx, string in enumerate(stream_input_file(args.input_file)):
+            file_name = f"{idx}.{args.extension}"
+            f.write(f"{file_name}\t{string}\n")
 
-def process_image(args, image_id, string):
-    fonts = [os.path.join(args.font_dir, p) for p in os.listdir(args.font_dir) if p.endswith(".ttf")]
-    image_path = os.path.join(args.output_dir, f"{image_id}.{args.extension}")
-    
-    print(f"Starting to generate image {image_id} with text: {string}")
-    
-    try:
+def get_last_processed_index(output_dir, extension):
+    existing_images = [f for f in os.listdir(output_dir) if f.endswith(extension)]
+    if not existing_images:
+        return -1
+    max_index = max(int(os.path.splitext(f)[0]) for f in existing_images)
+    return max_index
+
+def process_batch(args, start_idx, batch):
+    fonts = [os.path.join(args.font_dir, p) for p in os.listdir(args.font_dir) if os.path.splitext(p)[1] == ".ttf"]
+    for idx, string in enumerate(batch, start=start_idx):
         FakeTextDataGenerator.generate_from_tuple(
-            (image_id, string, rnd.choice(fonts), args.output_dir, 64, args.extension,
-             args.skew_angle, args.random_skew, args.blur, args.random_blur, args.background,
-             0, 0, 0, args.name_format, -1, 1, args.text_color, 0, 1.0,
-             args.character_spacing, (5, 5, 5, 5), False, 0, args.word_split, args.image_dir,
-             0, args.text_color, args.image_mode, 0)
+            (idx, string, fonts[rnd.randrange(0, len(fonts))], args.output_dir, 64,  # size (image height)
+            args.extension, args.skew_angle, args.random_skew, args.blur, args.random_blur,
+            args.background, 0, 0, 0, args.name_format, -1, 1, args.text_color, 0, 1.0, 
+            args.character_spacing, (5, 5, 5, 5), False, 0, args.word_split, args.image_dir,
+            0, args.text_color, args.image_mode, 0)
         )
-        remove_incorrect_srgb_profile(image_path)
-
-        labels_file_path = os.path.join(args.output_dir, "labels.txt")
-        with open(labels_file_path, "a", encoding="utf8") as labels_file:
-            labels_file.write(f"{image_id}.{args.extension}\t{string}\n")
-
-        print(f"Image {image_id} generated successfully")
-
-        return image_id
-
-    except Exception as e:
-        print(f"Error processing image {image_id}: {e}")
-        return None
-
-def get_last_image_id(output_dir, default_id=0):
-    id_file_path = os.path.join(output_dir, "last_image_id.txt")
-    if os.path.exists(id_file_path):
-        with open(id_file_path, "r") as id_file:
-            return int(id_file.read().strip())
-    return default_id
-
-def save_last_image_id(output_dir, last_image_id):
-    with open(os.path.join(output_dir, "last_image_id.txt"), "w") as id_file:
-        id_file.write(str(last_image_id))
-
-def get_last_processed_line(output_dir):
-    line_file_path = os.path.join(output_dir, "last_processed_line.txt")
-    if os.path.exists(line_file_path):
-        with open(line_file_path, "r") as line_file:
-            return int(line_file.read().strip())
-    return 0
-
-def save_last_processed_line(output_dir, line_idx):
-    with open(os.path.join(output_dir, "last_processed_line.txt"), "w") as line_file:
-        line_file.write(str(line_idx))
 
 def main():
     args = parse_arguments()
@@ -212,45 +161,26 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    try:
+        os.makedirs(args.output_dir)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise
 
-    image_id = get_last_image_id(args.output_dir)
-    start_line_idx = get_last_processed_line(args.output_dir)
+    p = Pool(args.thread_count)
 
-    with multiprocessing.Pool(processes=args.thread_count) as pool:
-        try:
-            for line_idx, batch in tqdm(stream_input_file(args.input_file, start_idx=start_line_idx, batch_size=1000)):
-                if terminate_flag.is_set():
-                    break
+    # Determine the starting index
+    start_idx = get_last_processed_index(args.output_dir, args.extension) + 1
 
-                while check_total_ram_usage(20000):
-                    print("High memory usage detected, waiting...")
-                    time.sleep(1)
-                    if terminate_flag.is_set():
-                        break
+    for batch in tqdm(stream_input_file(args.input_file, start_idx=start_idx, batch_size=10000)):
+        p.apply_async(process_batch, (args, start_idx, batch))
+        start_idx += len(batch)
 
-                results = [
-                    pool.apply_async(process_image, (args, image_id + idx, string))
-                    for idx, string in enumerate(batch)
-                ]
+    p.close()
+    p.join()
 
-                for result in results:
-                    if terminate_flag.is_set():
-                        break
-                    processed_image_id = result.get()
-                    if processed_image_id is not None:
-                        image_id = processed_image_id + 1
-
-                save_last_processed_line(args.output_dir, line_idx + 1)
-                save_last_image_id(args.output_dir, image_id)
-
-            pool.close()
-            pool.join()
-
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            pool.terminate()
-            pool.join()
+    if args.name_format == 2:
+        create_labels_file(args)
 
 if __name__ == "__main__":
     main()
